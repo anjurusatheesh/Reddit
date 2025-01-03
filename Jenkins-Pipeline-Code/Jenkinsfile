@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk11'
+        nodejs 'node'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/anjurusatheesh/Reddit.git'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                    -Dsonar.host.url=http://localhost:9000 \
+                    -Dsonar.login=squ_08676530db039c59edf3254ee19425f1481ca44d \
+                    -Dsonar.projectKey=reddit \
+                    -Dsonar.projectName=reddit \
+                    -X
+                '''
+            }
+        }
+
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh "trivy fs --format table -o fs-report.html ."
+            }
+        }
+
+        stage("Docker Build & Push") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'anjurusatheesh-docker', toolName: 'docker') {
+                        sh "docker build -t anjurusatheesh/reddit ."
+                        sh "docker push anjurusatheesh/reddit"
+                    }
+                }
+            }
+        }
+
+        stage("TRIVY Image Scan") {
+            steps {
+                sh "trivy image anjurusatheesh/reddit > trivyimage.txt"
+            }
+        }
+
+        stage('Deploy to Container') {
+            steps {
+                sh '''
+                    docker stop reddit || true
+                    docker rm reddit || true
+                    docker run -d --name reddit -p 3001:3000 anjurusatheesh/reddit
+                '''
+            }
+        }
+        stage('Executing Shell Script On Server') {
+            steps {
+                script {
+                    sshagent(['EC2']) {
+                        sh '''
+                           ssh -t -t ubuntu@15.206.74.254 -o StrictHostKeyChecking=no << EOF
+                            docker stop reddit || true
+                            docker rm reddit || true
+                            docker run -d --name reddit -p 3001:3000 anjurusatheesh/reddit 
+                            logout
+                            EOF
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    post {
+     always {
+        emailext attachLog: true,
+            subject: "'${currentBuild.result}'",
+            body: "Project: ${env.JOB_NAME}<br/>" +
+                "Build Number: ${env.BUILD_NUMBER}<br/>" +
+                "URL: ${env.BUILD_URL}<br/>",
+            to: 'anjurusatheesh56@gmail.com',
+            attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+        }
+    }
+}
